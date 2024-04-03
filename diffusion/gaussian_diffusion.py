@@ -664,6 +664,7 @@ class GaussianDiffusion:
             indices = tqdm(indices)
 
         for i in indices:
+            th.cuda.nvtx.range_push("iteration{}".format(i))
             t = th.tensor([i] * shape[0], device=device)
             with th.no_grad():
                 out = self.ddim_sample(
@@ -676,6 +677,7 @@ class GaussianDiffusion:
                     model_kwargs=model_kwargs,
                     eta=eta,
                 )
+                th.cuda.nvtx.range_pop()
                 yield out
                 img = out["sample"]
 

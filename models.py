@@ -13,8 +13,231 @@ import torch
 import torch.nn as nn
 import numpy as np
 import math
-from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
+from torch.jit import Final
+from enum import Enum
+from typing import Callable,Optional
+import torch.nn.functional as F
+from functools import partial
+from itertools import repeat
+import collections.abc
+import os
+from typing import Optional
 
+# from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
+
+__all__ = [
+    'is_exportable', 'is_scriptable', 'is_no_jit', 'use_fused_attn',
+    'set_exportable', 'set_scriptable', 'set_no_jit', 'set_layer_config', 'set_fused_attn'
+]
+
+# Set to True if prefer to have layers with no jit optimization (includes activations)
+_NO_JIT = False
+# Set to True if exporting a model with Same padding via ONNX
+_EXPORTABLE = False
+# use torch.scaled_dot_product_attention where possible
+_HAS_FUSED_ATTN = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+if 'TIMM_FUSED_ATTN' in os.environ:
+    _USE_FUSED_ATTN = int(os.environ['TIMM_FUSED_ATTN'])
+else:
+    _USE_FUSED_ATTN = 1  # 0 == off, 1 == on (for tested use), 2 == on (for experimental use)
+
+if(_USE_FUSED_ATTN):
+    print("Using Fused Attention")
+
+def is_no_jit():
+    return _NO_JIT
+
+
+class Format(str, Enum):
+    NCHW = 'NCHW'
+    NHWC = 'NHWC'
+    NCL = 'NCL'
+    NLC = 'NLC'
+
+def nchw_to(x: torch.Tensor, fmt: Format):
+    if fmt == Format.NHWC:
+        x = x.permute(0, 2, 3, 1)
+    elif fmt == Format.NLC:
+        x = x.flatten(2).transpose(1, 2)
+    elif fmt == Format.NCL:
+        x = x.flatten(2)
+    return x
+
+
+# From PyTorch internals
+def _ntuple(n):
+    def parse(x):
+        if isinstance(x, collections.abc.Iterable) and not isinstance(x, str):
+            return tuple(x)
+        return tuple(repeat(x, n))
+    return parse
+
+to_2tuple = _ntuple(2)
+
+def use_fused_attn(experimental: bool = False) -> bool:
+    # NOTE: ONNX export cannot handle F.scaled_dot_product_attention as of pytorch 2.0
+    if not _HAS_FUSED_ATTN or _EXPORTABLE:
+        return False
+    if experimental:
+        return _USE_FUSED_ATTN > 1
+    return _USE_FUSED_ATTN > 0
+
+
+class Mlp(nn.Module):
+    """ MLP as used in Vision Transformer, MLP-Mixer and related networks
+    """
+    def __init__(
+            self,
+            in_features,
+            hidden_features=None,
+            out_features=None,
+            act_layer=nn.GELU,
+            norm_layer=None,
+            bias=True,
+            drop=0.,
+            use_conv=False,
+    ):
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        bias = to_2tuple(bias)
+        drop_probs = to_2tuple(drop)
+        linear_layer = partial(nn.Conv2d, kernel_size=1) if use_conv else nn.Linear
+
+        self.fc1 = linear_layer(in_features, hidden_features, bias=bias[0])
+        self.act = act_layer()
+        self.drop1 = nn.Dropout(drop_probs[0])
+        self.norm = norm_layer(hidden_features) if norm_layer is not None else nn.Identity()
+        self.fc2 = linear_layer(hidden_features, out_features, bias=bias[1])
+        self.drop2 = nn.Dropout(drop_probs[1])
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.drop1(x)
+        x = self.norm(x)
+        x = self.fc2(x)
+        x = self.drop2(x)
+        return x
+
+
+class PatchEmbed(nn.Module):
+    """ 2D Image to Patch Embedding
+    """
+    output_fmt: Format
+    dynamic_img_pad: torch.jit.Final[bool]
+
+    def __init__(
+            self,
+            img_size: Optional[int] = 224,
+            patch_size: int = 16,
+            in_chans: int = 3,
+            embed_dim: int = 768,
+            norm_layer: Optional[Callable] = None,
+            flatten: bool = True,
+            output_fmt: Optional[str] = None,
+            bias: bool = True,
+            strict_img_size: bool = True,
+            dynamic_img_pad: bool = False,
+    ):
+        super().__init__()
+        self.patch_size = to_2tuple(patch_size)
+        if img_size is not None:
+            self.img_size = to_2tuple(img_size)
+            self.grid_size = tuple([s // p for s, p in zip(self.img_size, self.patch_size)])
+            self.num_patches = self.grid_size[0] * self.grid_size[1]
+        else:
+            self.img_size = None
+            self.grid_size = None
+            self.num_patches = None
+
+        if output_fmt is not None:
+            self.flatten = False
+            self.output_fmt = Format(output_fmt)
+        else:
+            # flatten spatial dim and transpose to channels last, kept for bwd compat
+            self.flatten = flatten
+            self.output_fmt = Format.NCHW
+        self.strict_img_size = strict_img_size
+        self.dynamic_img_pad = dynamic_img_pad
+
+        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size, bias=bias)
+        self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        if self.img_size is not None:
+            if self.strict_img_size:
+                assert H == self.img_size[0], f"Input height ({H}) doesn't match model ({self.img_size[0]})."
+                assert W == self.img_size[1], f"Input width ({W}) doesn't match model ({self.img_size[1]})."
+            elif not self.dynamic_img_pad:
+                assert H % self.patch_size[0] == 0, f"Input height ({H}) should be divisible by patch size ({self.patch_size[0]})."
+                
+                assert W % self.patch_size[1] == 0, f"Input width ({W}) should be divisible by patch size ({self.patch_size[1]})."
+                
+        if self.dynamic_img_pad:
+            pad_h = (self.patch_size[0] - H % self.patch_size[0]) % self.patch_size[0]
+            pad_w = (self.patch_size[1] - W % self.patch_size[1]) % self.patch_size[1]
+            x = F.pad(x, (0, pad_w, 0, pad_h))
+        x = self.proj(x)
+        if self.flatten:
+            x = x.flatten(2).transpose(1, 2)  # NCHW -> NLC
+        elif self.output_fmt != Format.NCHW:
+            x = nchw_to(x, self.output_fmt)
+        x = self.norm(x)
+        return x
+
+
+class Attention(nn.Module):
+    fused_attn: Final[bool]
+
+    def __init__(
+            self,
+            dim: int,
+            num_heads: int = 8,
+            qkv_bias: bool = False,
+            qk_norm: bool = False,
+            attn_drop: float = 0.,
+            proj_drop: float = 0.,
+            norm_layer: nn.Module = nn.LayerNorm,
+    ) -> None:
+        super().__init__()
+        assert dim % num_heads == 0, 'dim should be divisible by num_heads'
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim ** -0.5
+        self.fused_attn = use_fused_attn()
+
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
+        self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.unbind(0)
+        q, k = self.q_norm(q), self.k_norm(k)
+
+        if self.fused_attn:
+            x = F.scaled_dot_product_attention(
+                q, k, v,
+                dropout_p=self.attn_drop.p if self.training else 0.,
+            )
+        else:
+            q = q * self.scale
+            attn = q @ k.transpose(-2, -1)
+            attn = attn.softmax(dim=-1)
+            attn = self.attn_drop(attn)
+            x = attn @ v
+
+        x = x.transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+    
 
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
@@ -229,12 +452,6 @@ class DiT(nn.Module):
         x = torch.einsum('nhwpqc->nchpwq', x)
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
-    
-    def ckpt_wrapper(self, module):
-        def ckpt_forward(*inputs):
-            outputs = module(*inputs)
-            return outputs
-        return ckpt_forward
 
     def forward(self, x, t, y):
         """
@@ -248,7 +465,7 @@ class DiT(nn.Module):
         y = self.y_embedder(y, self.training)    # (N, D)
         c = t + y                                # (N, D)
         for block in self.blocks:
-            x = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(block), x, c)       # (N, T, D)
+            x = block(x, c)                      # (N, T, D)
         x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
         return x
