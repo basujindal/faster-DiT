@@ -1,17 +1,26 @@
-## Scalable Diffusion Models with Transformers (DiT)<br><sub>Improved PyTorch Implementation</sub>
+## Quantized DiT
 
-### [Paper](http://arxiv.org/abs/2212.09748) | [Project Page](https://www.wpeebles.com/DiT) | Run DiT-XL/2 [![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-blue)](https://huggingface.co/spaces/wpeebles/DiT) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](http://colab.research.google.com/github/facebookresearch/DiT/blob/main/run_DiT.ipynb) <a href="https://replicate.com/arielreplicate/scalable_diffusion_with_transformers"><img src="https://replicate.com/arielreplicate/scalable_diffusion_with_transformers/badge"></a>
+This repository is a modified version of the original DiT repository aimed at faster and more efficient inference using Quantization and GPU optimizations. It is not intended for training new models.
+
+### [Paper](http://arxiv.org/abs/2212.09748) | [Project Page](https://www.wpeebles.com/DiT) | Run DiT-XL/2 [![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-blue)](https://huggingface.co/spaces/wpeebles/DiT) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](http://colab.research.google.com/github/facebookresearch/DiT/blob/main/run_DiT.ipynb)
 
 ![DiT samples](visuals/sample_grid_0.png)
 
-This repo features an improved PyTorch implementation for the paper [**Scalable Diffusion Models with Transformers**](https://www.wpeebles.com/DiT).
 
-It contains:
+# Goal
 
-* 🪐 An improved PyTorch [implementation](models.py) and the original [implementation](train_options/models_original.py) of DiT
-* ⚡️ Pre-trained class-conditional DiT models trained on ImageNet (512x512 and 256x256)
-* 💥 A self-contained [Hugging Face Space](https://huggingface.co/spaces/wpeebles/DiT) and [Colab notebook](http://colab.research.google.com/github/facebookresearch/DiT/blob/main/run_DiT.ipynb) for running pre-trained DiT-XL/2 models
-* 🛸 An improved DiT [training script](train.py) and several [training options](train_options)
+4 bit (NF or INT4 or FP4) storage and 8bit inference using int8 matrix multiplication of Diffusion Transformer model (DiT)
+
+## Plan
+
+- [x] Literature review on quantization methods. [quant.md](quant.md)
+- [x] Use bnb to check int8 and int4 quantization. 
+- [ ] Try simple quantization for storage and see the impact on inference latency and quality. (Since model is small, no outliers are there)
+- [ ] Use tensor-int8 package to for int8 matrix multiplication.
+- [ ] Check AMD support
+- [ ] Use Q-Diffusion for improving the quantization of the model.
+- [ ] Use GPTQ/kernels/exllamav2 kernels for int8 matrix multiplication
+- [ ] Do research on improving the quantization of the model.
 
 ## Setup
 
@@ -60,31 +69,6 @@ python sample.py --model DiT-L/4 --image-size 256 --ckpt /path/to/model.pt
 ```
 
 
-## Training
-### Preparation Before Training
-To extract ImageNet features with `1` GPUs on one node:
-
-```bash
-torchrun --nnodes=1 --nproc_per_node=1 extract_features.py --model DiT-XL/2 --data-path /path/to/imagenet/train --features-path /path/to/store/features
-```
-
-### Training DiT
-We provide a training script for DiT in [`train.py`](train.py). This script can be used to train class-conditional 
-DiT models, but it can be easily modified to support other types of conditioning. 
-
-To launch DiT-XL/2 (256x256) training with `1` GPUs on one node:
-
-```bash
-accelerate launch --mixed_precision fp16 train.py --model DiT-XL/2 --features-path /path/to/store/features
-```
-
-To launch DiT-XL/2 (256x256) training with `N` GPUs on one node:
-```bash
-accelerate launch --multi_gpu --num_processes N --mixed_precision fp16 train.py --model DiT-XL/2 --features-path /path/to/store/features
-```
-
-Alternatively, you have the option to extract and train the scripts located in the folder [training options](train_options).
-
 
 ### PyTorch Training Results
 
@@ -101,16 +85,6 @@ similar (and sometimes slightly better) results compared to the JAX-trained mode
 These models were trained at 256x256 resolution; we used 8x A100s to train XL/2 and 4x A100s to train B/4. Note that FID 
 here is computed with 250 DDPM sampling steps, with the `mse` VAE decoder and without guidance (`cfg-scale=1`). 
 
-
-### Improved Training Performance
-In comparison to the original implementation, we implement a selection of training speed acceleration and memory saving features including gradient checkpointing, mixed precision training, and pre-extracted VAE features, resulting in a 95% speed increase and 60% memory reduction on DiT-XL/2. Some data points using a global batch size of 128 with a A100:
- 
-| gradient checkpointing | mixed precision training | feature pre-extraction | training speed | memory       |
-|:----------------------:|:------------------------:|:----------------------:|:--------------:|:------------:|
-| ❌                    | ❌                       | ❌                    | -              | out of memory|
-| ✔                     | ❌                       | ❌                    | 0.43 steps/sec | 44045 MB     |
-| ✔                     | ✔                        | ❌                    | 0.56 steps/sec | 40461 MB     |
-| ✔                     | ✔                        | ✔                     | 0.84 steps/sec | 27485 MB     |
 
 
 ## Evaluation (FID, Inception Score, etc.)

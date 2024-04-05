@@ -1,16 +1,3 @@
-# Goal
-
-4 bit (NF or INT4 or FP4) storage and 8bit computation using int8 matrix multiplication of Diffusion Transformer model (DiT)
-
-## Plan
-
-- Start with simple quantization for storage and see the impact on inference latency and quality. (Since model is small, no outliers are there)
-- Use bnb to check int8 and int4 quantization.
-- Use bnb to check int8 matrix multiplication and use their kernels
-- Use GPTQ kernels for int8 matrix multiplication
-- Write own kernels for int8 matrix multiplication `:)`
-
-
 ## Quantization
 
 There are multiple levels of quantization, a one of the simplest method is to store the model weights using reduce number of bits and to convert them beck to bf16 during inference. Here the activations are computed in bf16 itself. 
@@ -125,3 +112,46 @@ This means that FP8 will have to be significantly more accurate than INT8 to be 
 ### Quantizing bias
 
 Biases are not converted because to preserve the accuracy of a typical addmm operation, they must be converted with a scale that is equal to the product of the input and weight scales, which leads to a ridiculously small scale, and conversely requires a very high bitwidth to avoid clipping. 
+
+
+## Quantization layer reference
+
+https://pytorch.org/docs/stable/amp.html#torch.autocast
+
+### CUDA Ops that can autocast to float16
+__matmul__, addbmm, addmm, addmv, addr, baddbmm, bmm, chain_matmul, multi_dot, conv1d, conv2d, conv3d, conv_transpose1d, conv_transpose2d, conv_transpose3d, GRUCell, linear, LSTMCell, matmul, mm, mv, prelu, RNNCell
+
+### CUDA Ops that can autocast to float32
+__pow__, __rdiv__, __rpow__, __rtruediv__, acos, asin, binary_cross_entropy_with_logits, cosh, cosine_embedding_loss, cdist, cosine_similarity, cross_entropy, cumprod, cumsum, dist, erfinv, exp, expm1, group_norm, hinge_embedding_loss, kl_div, l1_loss, layer_norm, log, log_softmax, log10, log1p, log2, margin_ranking_loss, mse_loss, multilabel_margin_loss, multi_margin_loss, nll_loss, norm, normalize, pdist, poisson_nll_loss, pow, prod, reciprocal, rsqrt, sinh, smooth_l1_loss, soft_margin_loss, softmax, softmin, softplus, sum, renorm, tan, triplet_margin_loss
+
+### CUDA Ops that promote to the widest input type
+These ops don’t require a particular dtype for stability, but take multiple inputs and require that the inputs’ dtypes match. If all of the inputs are float16, the op runs in float16. If any of the inputs is float32, autocast casts all inputs to float32 and runs the op in float32.
+
+addcdiv, addcmul, atan2, bilinear, cross, dot, grid_sample, index_put, scatter_add, tensordot
+
+Some ops not listed here (e.g., binary ops like add) natively promote inputs without autocasting’s intervention. If inputs are a mixture of float16 and float32, these ops run in float32 and produce float32 output, regardless of whether autocast is enabled.
+
+
+## Profile CUDA kernels
+
+Add the following to profile CUDA kernels in PyTorch
+```python
+import torch
+torch.cuda.cudart().cudaProfilerStart()
+torch.cuda.nvtx.range_push("backward")
+# Pytorch code using CUDA kernels (for example, model inference)
+torch.cuda.nvtx.range_pop()
+torch.cuda.cudart().cudaProfilerStop()
+```
+
+Run the following command to profile the CUDA kernels
+
+```bash
+nsys profile -w true -t cuda,nvtx,osrt,cudnn,cublas -s cpu  --capture-range=cudaProfilerApi  --cudabacktrace=true -x true -o bf16_true_disabled_doubleq_dis2 tests/test_linear_modules.py 
+```
+
+Sources:
+- https://gist.github.com/mcarilli/376821aa1a7182dfcf59928a7cde3223
+- https://dev-discuss.pytorch.org/t/using-nsight-systems-to-profile-gpu-workload/59
+
+
