@@ -12,7 +12,7 @@ This repository is a modified version of the original DiT repository aimed at fa
 ## Plan
 
 - [x] Literature review on quantization methods. [quant.md](quant.md)
-- [x] Use bnb to check int8 and int4 quantization. [bnb.md](bnb.md)
+- [x] Use bnb to check int8 and int4 quantization. [bnb.md](bnb/bnb.md)
 - [ ] Try simple quantization for storage and see the impact on inference latency and quality. (Since model is small, no outliers are there)
 - [ ] Use tensor-int8 package to for int8 matrix multiplication.
 - [ ] Check AMD support
