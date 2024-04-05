@@ -4,8 +4,6 @@ This repository is a modified version of the original DiT repository aimed at fa
 
 ### [Paper](http://arxiv.org/abs/2212.09748) | [Project Page](https://www.wpeebles.com/DiT) | Run DiT-XL/2 [![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-blue)](https://huggingface.co/spaces/wpeebles/DiT) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](http://colab.research.google.com/github/facebookresearch/DiT/blob/main/run_DiT.ipynb)
 
-![DiT samples](visuals/sample_grid_0.png)
-
 
 # Goal
 
@@ -14,7 +12,7 @@ This repository is a modified version of the original DiT repository aimed at fa
 ## Plan
 
 - [x] Literature review on quantization methods. [quant.md](quant.md)
-- [x] Use bnb to check int8 and int4 quantization. 
+- [x] Use bnb to check int8 and int4 quantization. [bnb.md](bnb.md)
 - [ ] Try simple quantization for storage and see the impact on inference latency and quality. (Since model is small, no outliers are there)
 - [ ] Use tensor-int8 package to for int8 matrix multiplication.
 - [ ] Check AMD support
